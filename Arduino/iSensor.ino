@@ -1,3 +1,6 @@
+// Sensor type: SEN0211 (AC current sensor, 30 A range).
+// Board type: Arduino Uno (ATmega328P).
+
 #include <ArduinoJson.h>
 
 // --- Configuration ---------------------------------------------------------
