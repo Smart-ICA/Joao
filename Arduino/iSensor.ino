@@ -28,6 +28,7 @@ constexpr float CURRENT_CONVERSION_FACTOR =
    /1024.0f   // ADC resolution
    / 2.8f     // sensor internal gain/divider
    ) * 30.0f; // AC Current Sensor tention range (5A,10A,20A,30A)
+
 void setup() {
   Serial.begin(BAUD_RATE);
   Serial.print(F("# Starting power meter v"));
