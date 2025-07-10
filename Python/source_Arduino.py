@@ -1,3 +1,16 @@
+'''
+This is a source agent that reads data from an Arduino via a serial port.
+It expects the Arduino to send JSON-formatted data, which it processes and returns.
+It will read data from the Arduino, parse it, and return it in the MADS Network.
+
+Note: This code does the same as the Arduino source agent, but in Python.
+
+To run this script, use the following command:
+-> mads python -s tcp://mads-broker.local:9092 -n python_source -m source_Arduino
+
+Where python_source is the name of the agent (mads.ini), and source_Arduino is the name of the script (.py).
+'''
+
 import json
 import time
 import random
