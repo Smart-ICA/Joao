@@ -1,3 +1,15 @@
+'''
+This script is a sink agent for visualizing current data from an Arduino device.
+It uses Matplotlib to plot the data and display a table of the latest values.
+
+It expects the data to be in a specific format, with timestamps and current values for three channels (I1, I2, I3).
+
+To run this script (in a Raspberry for example), use the following command:
+-> mads python -s tcp://mads-broker.local:9092 -n python_sink -m sink_Arduino
+
+Where python_sink is the name of the agent (mads.ini), and sink_Arduino is the name of the script (.py).
+'''
+
 import os
 os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
