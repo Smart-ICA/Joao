@@ -1,132 +1,129 @@
 import os
-# Use the headless Agg backend before importing pyplot
-os.environ['MPLBACKEND'] = 'Agg'
+os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
 import json
 from collections import deque
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
-# Specify that this is a sink agent
+# ——— Specifies that this script is a sink agent ———
 agent_type = "sink"
 
 def setup():
     """
-    Called once when the sink starts.
-    Initializes buffers, figure, axes and lines.
+    Called once at sink initialization.
+    Initializes deques, creates figure/axes/lines and enables interactive mode.
     """
     print("[Python] Setting up sink...")
     print("[Python] Parameters: " + json.dumps(params))
     print("[Python] Topic: " + topic)
 
-    # Max number of points to keep (can be overridden in params)
-    max_len = params.get("max_len", 100)
-    # Path to save the live plot image
-    state['output_path'] = params.get("output_path", "/tmp/live_plot.png")
+    # how many samples to store and display
+    max_len   = params.get("max_len", 20)
+    view_len  = params.get("view_len", max_len)
+    state['view_len'] = view_len
 
-    # ——— Buffers ———
-    state['t_data']     = deque(maxlen=max_len)
-    state['X']          = deque(maxlen=max_len)
-    state['Y']          = deque(maxlen=max_len)
-    state['Z']          = deque(maxlen=max_len)
-    state['magnitude']  = deque(maxlen=max_len)
-    state['vibration']  = deque(maxlen=max_len)
-    state['sht31_temp'] = deque(maxlen=max_len)
-    state['sht31_hum']  = deque(maxlen=max_len)
-    state['dht_temp']   = deque(maxlen=max_len)
-    state['dht_hum']    = deque(maxlen=max_len)
-    state['sound_level']= deque(maxlen=max_len)
+    # ——— data buffers ———
+    keys = ['t_data', 'I1', 'I2', 'I3']
+    for k in keys:
+        state[k] = deque(maxlen=max_len)
 
-    # ——— Figure & Axes ———
-    fig, axes = plt.subplots(5, 1, figsize=(10, 12), sharex=True)
-    state['fig']  = fig
-    state['axes'] = axes
+    # ——— matplotlib + GridSpec setup ———
+    plt.ion()
+    fig = plt.figure(figsize=(8, 10))  # increase height for a larger table area
+    gs  = gridspec.GridSpec(
+        2, 1,
+        height_ratios=[4, 2],           # give the table more space
+        bottom=0.05, top=0.95, left=0.08, right=0.95
+    )
 
+    # one axis for the current plots
+    axes = [fig.add_subplot(gs[0, 0])]
+    # one axis for the table of latest values
+    table_ax = fig.add_subplot(gs[1, 0])
+    table_ax.axis('off')
+
+    state['fig']      = fig
+    state['axes']     = axes
+    state['table_ax'] = table_ax
+
+    # ——— Create empty lines and legend ———
     lines = []
-    # 1) Accelerometer X/Y/Z
-    axes[0].set_ylabel('Accel (g)')
-    lines += axes[0].plot([], [], label='X')
-    lines += axes[0].plot([], [], label='Y')
-    lines += axes[0].plot([], [], label='Z')
-    axes[0].legend(loc='upper right')
-
-    # 2) Magnitude / Vibration
-    axes[1].set_ylabel('Magnitude / Vib')
-    lines += axes[1].plot([], [], label='Magnitude')
-    lines += axes[1].plot([], [], label='Vibration')
-    axes[1].legend(loc='upper right')
-
-    # 3) Temperatures
-    axes[2].set_ylabel('Temperature (°C)')
-    lines += axes[2].plot([], [], label='SHT31 Temp')
-    lines += axes[2].plot([], [], label='DHT Temp')
-    axes[2].legend(loc='upper right')
-
-    # 4) Humidities
-    axes[3].set_ylabel('Humidity (%)')
-    lines += axes[3].plot([], [], label='SHT31 Hum')
-    lines += axes[3].plot([], [], label='DHT Hum')
-    axes[3].legend(loc='upper right')
-
-    # 5) Sound Level
-    axes[4].set_ylabel('Sound Level')
-    lines += axes[4].plot([], [], label='Sound')
-    axes[4].set_xlabel('Time (ms)')
-    axes[4].legend(loc='upper right')
+    axes[0].set_ylabel('Current (A)')
+    axes[0].set_xlabel('Time (ms)')
+    lines += axes[0].plot([], [], label='I1')
+    lines += axes[0].plot([], [], label='I2')
+    lines += axes[0].plot([], [], label='I3')
+    axes[0].legend(loc='upper left')
 
     state['lines'] = lines
 
-    # Layout tweak
-    plt.tight_layout()
+    fig.tight_layout()
+    fig.show()
 
 
 def deal_with_data():
     """
-    Called for each incoming data packet.
-    Updates buffers, redraws lines, adjusts axes, and saves the plot.
+    Called whenever a new data packet arrives.
+    Updates buffers, redraws lines, adjusts axes and the values table.
     """
-    # Parse incoming data
     try:
         t = data['millis']
         d = data['data']
     except (KeyError, TypeError):
         return
 
-    # Append to buffers
+    # append to buffers
     state['t_data'].append(t)
-    state['X'].append(d['X']);    state['Y'].append(d['Y']);    state['Z'].append(d['Z'])
-    state['magnitude'].append(d['magnitude'])
-    state['vibration'].append(d['vibration'])
-    state['sht31_temp'].append(d['sht31_temperature'])
-    state['sht31_hum'].append(d['sht31_humidity'])
-    state['dht_temp'].append(d['dht_temperature'])
-    state['dht_hum'].append(d['dht_humidity'])
-    state['sound_level'].append(d['sound_level'])
+    state['I1'].append(d['I1'])
+    state['I2'].append(d['I2'])
+    state['I3'].append(d['I3'])
 
-    # Update each line in order
+    # prepare display window (only the last view_len samples)
+    times = list(state['t_data'])
+    n     = len(times)
+    v     = state['view_len']
+    start = max(0, n - v)
+    t_win = times[start:]
+
+    # update each line in the plot
     idx = 0
     def upd(series):
         nonlocal idx
-        state['lines'][idx].set_data(state['t_data'], series)
+        vals = list(series)[start:]
+        state['lines'][idx].set_data(t_win, vals)
         idx += 1
 
-    for series in (
-        state['X'], state['Y'], state['Z'],
-        state['magnitude'], state['vibration'],
-        state['sht31_temp'], state['dht_temp'],
-        state['sht31_hum'], state['dht_hum'],
-        state['sound_level'],
-    ):
+    for series in (state['I1'], state['I2'], state['I3']):
         upd(series)
 
-    # Adjust axes limits and autoscale
-    t_min, t_max = min(state['t_data']), max(state['t_data'])
-    for ax in state['axes']:
-        ax.set_xlim(t_min, t_max)
-        ax.relim()
-        ax.autoscale_view()
+    # adjust axes limits
+    if t_win:
+        xmin, xmax = t_win[0], t_win[-1]
+        for ax in state['axes']:
+            ax.set_xlim(xmin, xmax)
+            ax.relim()
+            ax.autoscale_view()
 
-    # Redraw canvas and save headless image
+    # — update table with the latest values —
+    labels = ['I1', 'I2', 'I3']
+    latest = [state['I1'][-1], state['I2'][-1], state['I3'][-1]]
+
+    ax_table = state['table_ax']
+    ax_table.clear()
+    ax_table.axis('off')
+
+    tbl = ax_table.table(
+        cellText=[[f"{v:.2f}" for v in latest]],
+        colLabels=labels,
+        loc='center',
+        cellLoc='center',   # center the cell contents
+        colLoc='center'     # center the column labels
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(20)
+    tbl.scale(1, 4)
+
+    # draw on the GUI
     state['fig'].canvas.draw()
-    output_path = state['output_path']
-    state['fig'].savefig(output_path)
-    print(f"[Python] Saved live plot to {output_path}")
+    state['fig'].canvas.flush_events()
