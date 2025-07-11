@@ -5,9 +5,9 @@ It uses Matplotlib to plot the data and display a table of the latest values.
 It expects the data to be in a specific format, with timestamps and current values for three channels (I1, I2, I3).
 
 To run this script (in a Raspberry for example), use the following command:
--> mads python -s tcp://mads-broker.local:9092 -n python_sink -m sink_Arduino_Plot
+-> mads python -s tcp://mads-broker.local:9092 -n python_sink -m sink_arduino_plot
 
-Where python_sink is the name of the agent (mads.ini), and sink_Arduino_Plot is the name of the script (.py).
+Where python_sink is the name of the agent (mads.ini), and sink_arduino_plot is the name of the script (.py).
 '''
 
 import os
