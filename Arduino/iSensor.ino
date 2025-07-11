@@ -1,3 +1,12 @@
+/*
+This is a simple Arduino sketch for a power meter that reads current values from three analog pins,
+calculates the current in amperes, and sends the data as a JSON string over Serial.
+
+This code is designed to work with the DFRobot Gravity Analog AC Current Sensor (SKU: SEN0211).
+For more information about the sensor, visit:
+https://wiki.dfrobot.com/Gravity_Analog_AC_Current_Sensor__SKU_SEN0211_
+*/
+
 #include <ArduinoJson.h>
 
 // Version and hardware configuration
