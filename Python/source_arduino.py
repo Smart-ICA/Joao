@@ -16,7 +16,6 @@ import time
 import random
 from datetime import datetime
 import serial
-import serial.tools.list_ports
 
 # Declare this as a source agent
 agent_type = "source"
@@ -24,39 +23,39 @@ agent_type = "source"
 # Serial port object will be initialized in setup()
 ser = None
 
-def choose_port():
+def auto_detect_port():
     """
-    List available serial ports and prompt the user for a device suffix
-    until a valid port is opened.
+    Attempt to connect to common Arduino serial ports in sequence.
+    Returns the first successful Serial connection.
+    Raises a RuntimeError if none are available.
     """
-    while True:
-        print("[INFO] Available serial ports:")
-        for port_info in serial.tools.list_ports.comports():
-            print(f"  {port_info.device} – {port_info.description}")
-
-        suffix = input(
-            "[INPUT] Enter only the device suffix for Arduino serial port "
-            "(e.g. ACM0 for /dev/ttyACM0, USB1 for /dev/ttyUSB1): "
-        ).strip()
-        port_path = f"/dev/tty{suffix}"
-
+    candidates = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+    print("[INFO] Attempting to auto-detect Arduino serial port...")
+    for port_path in candidates:
         try:
             connection = serial.Serial(port_path, 115200, timeout=1)
+            print(f"[INFO] Connected to {port_path}")
             return connection
-        except serial.SerialException as e:
-            print(f"\n[ERROR] Could not open {port_path}: {e}")
-            print("[ERROR] Please verify the suffix and ensure the port is not in use. Retrying...\n")
-            time.sleep(1)
+        except serial.SerialException:
+            print(f"[INFO] {port_path} not available.")
+    print("[ERROR] Could not find a suitable serial port (ACM0/1 or USB0/1).")
+    raise RuntimeError("No Arduino serial port found.")
 
 def setup():
     global ser
     print("[PYTHON] Setting up source agent...")
     print("[PYTHON] Parameters: " + json.dumps(params))
 
-    ser = choose_port()
+    try:
+        ser = auto_detect_port()
+    except RuntimeError as e:
+        print(f"[ERROR] {e}")
+        # Depending on your use case, you may want to exit or retry
+        raise
+
     ser.reset_input_buffer()
     state["n"] = 0
-    print(f"[PYTHON] Successfully connected to {ser.port}")
+    print(f"[PYTHON] Successfully initialized serial connection on {ser.port}")
 
 def get_output():
     global ser
