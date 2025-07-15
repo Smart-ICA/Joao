@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import numpy as np
 
-def connect_to_mongodb(connection_string="mongodb://mads-broker.local:27017/", database_name="your_database"):
+def connect_to_mongodb(connection_string="mongodb://localhost:27017/", database_name="your_database"):
     """Connect to MongoDB and return database object"""
     client = MongoClient(connection_string)
     if not client:
