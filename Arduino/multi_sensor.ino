@@ -1,3 +1,12 @@
+/*
+This is a multi-sensor Arduino sketch that reads temperature, accelerometer data,
+vibration, and loudness, then sends the data as a JSON string over Serial.
+
+This code is designed to work with the MCP9808 temperature sensor (I2C), ADXL345
+accelerometer (I2C), and an analog loudness sensor.
+*/
+
+
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <Adafruit_MCP9808.h>
