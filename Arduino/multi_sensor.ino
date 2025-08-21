@@ -6,7 +6,6 @@ This code is designed to work with the MCP9808 temperature sensor (I2C), ADXL345
 accelerometer (I2C), and an analog loudness sensor.
 */
 
-
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <Adafruit_MCP9808.h>
