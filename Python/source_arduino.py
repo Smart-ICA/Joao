@@ -25,20 +25,28 @@ ser = None
 
 def auto_detect_port():
     """
-    Attempt to connect to common Arduino serial ports in sequence.
-    Returns the first successful Serial connection.
-    Raises a RuntimeError if none are available.
+    Tenta conectar nas portas e ler um dado.
+    Só retorna a porta se conseguir ler um dado.
     """
     candidates = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
     print("[INFO] Attempting to auto-detect Arduino serial port...")
     for port_path in candidates:
         try:
             connection = serial.Serial(port_path, 115200, timeout=1)
-            print(f"[INFO] Connected to {port_path}")
-            return connection
-        except serial.SerialException:
-            print(f"[INFO] {port_path} not available.")
-    print("[ERROR] Could not find a suitable serial port (ACM0/1 or USB0/1).")
+            time.sleep(2)  # aguarda estabilização
+            connection.reset_input_buffer()
+            test = connection.readline()
+            if test:  # conseguiu ler algum dado?
+                print(f"[INFO] Connected to {port_path}")
+                return connection
+            else:
+                print(f"[INFO] {port_path} did not return data.")
+                connection.close()
+        except serial.SerialException as e:
+            print(f"[INFO] {port_path} not available: {e}")
+        except Exception as e:
+            print(f"[INFO] {port_path} error: {e}")
+    print("[ERROR] Could not find a suitable serial port with available data.")
     raise RuntimeError("No Arduino serial port found.")
 
 def setup():
