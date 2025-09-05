@@ -3,11 +3,9 @@ Source agent that reads JSON lines from an Arduino over a serial port.
 
 Behavior:
 - Auto-detects an available serial port (/dev/ttyACMx or /dev/ttyUSBx).
-- Ensures per-port exclusivity (pySerial exclusive=True when available, plus a /tmp file lock on POSIX).
-- Accepts an explicit port via params["serial_port"], but will still validate it.
+- Ensures process exclusivity per port (pySerial exclusive=True when available, plus a simple /tmp file lock when supported).
+- Accepts a port explicitly via params["serial_port"] if provided.
 - Confirms a port only after reading a valid JSON line.
-- Automatically retries connection if no port is available or after a disconnect.
-
 To run this script, use the following command:
 -> mads python -s tcp://mads-broker.local:9092 -n python_source -m source_arduino
 
@@ -20,20 +18,16 @@ import os
 import serial
 from serial.tools import list_ports
 
-# Optional POSIX file-lock support
+# Optional file-lock support (Linux/Unix)
 try:
     import fcntl
     HAS_FCNTL = True
 except Exception:
     HAS_FCNTL = False
 
-agent_type = "source"
-
+agent_type = "source"  # required by MADS
 ser = None
-_port_lock_fh = None
-_configured_port = None
-_last_connect_attempt = 0.0
-_RETRY_INTERVAL_SECONDS = 3.0
+_port_lock_fh = None  # keep the lock handle open while using the port
 
 
 def list_candidate_ports():
@@ -82,13 +76,18 @@ def release_file_lock(fh):
 def open_serial(port_path, baudrate=115200, timeout=1):
     """Open the serial port with exclusivity when supported."""
     try:
+        # pySerial on POSIX supports exclusive=True (TIOCEXCL) in newer versions
         return serial.Serial(port_path, baudrate, timeout=timeout, exclusive=True)
     except TypeError:
+        # Older pySerial: fall back without the exclusive flag
         return serial.Serial(port_path, baudrate, timeout=timeout)
 
 
 def probe_valid_json(connection, max_lines=12, settle_seconds=2.0):
-    """Wait briefly and try to read a valid JSON line."""
+    """
+    After opening the port, wait briefly and try to read a valid JSON line.
+    Returns True if a JSON object is parsed successfully.
+    """
     time.sleep(settle_seconds)  # many Arduinos reset on open
     try:
         connection.reset_input_buffer()
@@ -115,97 +114,49 @@ def probe_valid_json(connection, max_lines=12, settle_seconds=2.0):
     return False
 
 
-def close_current_serial():
-    """Close current serial and release lock, if any."""
-    global ser, _port_lock_fh
-    try:
-        if ser:
-            try:
-                ser.close()
-            except Exception:
-                pass
-    finally:
-        ser = None
-        if _port_lock_fh:
-            try:
-                release_file_lock(_port_lock_fh)
-            except Exception:
-                pass
-            _port_lock_fh = None
-
-
-def ensure_serial_open(force=False):
+def auto_detect_port():
     """
-    Ensure 'ser' is open and ready. If not, try to auto-detect and open.
-    Throttles connection attempts unless 'force' is True.
+    Find the first available port that:
+    - Is not locked by another process.
+    - Can be opened (ideally with exclusive access).
+    - Produces at least one valid JSON line.
     """
-    global ser, _port_lock_fh, _last_connect_attempt
+    print("[INFO] Auto-detecting serial port...")
+    global _port_lock_fh
 
-    if ser and getattr(ser, "is_open", False):
-        return True
-
-    now = time.time()
-    if not force and (now - _last_connect_attempt) < _RETRY_INTERVAL_SECONDS:
-        return False
-    _last_connect_attempt = now
-
-    # Try an explicit configured port first, then detected candidates
-    candidates = []
-    if _configured_port:
-        candidates.append(_configured_port)
-    for p in list_candidate_ports():
-        if p not in candidates:
-            candidates.append(p)
-
-    for port in candidates:
-        # Acquire a lock (if supported) to avoid multi-process conflicts
+    for port in list_candidate_ports():
+        # Try to lock the port to avoid multi-process conflicts
         lock_fh = acquire_file_lock(port)
         if HAS_FCNTL and lock_fh is None:
-            # Locked by another process
+            print(f"[INFO] Skipping {port}: locked by another process.")
             continue
 
         conn = None
         try:
             conn = open_serial(port, 115200, timeout=1)
-        except serial.SerialException:
+        except serial.SerialException as e:
+            print(f"[INFO] {port} unavailable: {e}")
             release_file_lock(lock_fh)
             continue
-        except Exception:
+        except Exception as e:
+            print(f"[INFO] {port} open error: {e}")
             release_file_lock(lock_fh)
             continue
 
         ok = probe_valid_json(conn, max_lines=15, settle_seconds=2.0)
         if ok:
-            ser = conn
-            # keep the lock while using the port
-            _set_lock(lock_fh)
-            try:
-                ser.reset_input_buffer()
-            except Exception:
-                pass
-            print(f"[INFO] Serial connected on {ser.port}")
-            return True
+            print(f"[INFO] Connected to {port}")
+            _port_lock_fh = lock_fh  # keep the lock while using the port
+            return conn
         else:
+            print(f"[INFO] {port} did not yield valid JSON. Trying next...")
             try:
                 conn.close()
             except Exception:
                 pass
             release_file_lock(lock_fh)
 
-    # No suitable port found
-    close_current_serial()
-    return False
-
-
-def _set_lock(lock_fh):
-    """Helper to assign the active lock handle, releasing any previous one."""
-    global _port_lock_fh
-    if _port_lock_fh and _port_lock_fh is not lock_fh:
-        try:
-            release_file_lock(_port_lock_fh)
-        except Exception:
-            pass
-    _port_lock_fh = lock_fh
+    raise RuntimeError("No suitable serial port found.")
 
 
 def setup():
@@ -213,25 +164,42 @@ def setup():
     Called by the MADS framework to initialize the source.
     Expects a global 'params' dict and 'state' dict provided by MADS.
     """
-    global _configured_port
+    global ser
     print("[PYTHON] Setting up source agent...")
-    try:
-        print("[PYTHON] Parameters: " + json.dumps(params))
-    except Exception:
-        print("[PYTHON] Parameters: {}")
+    print("[PYTHON] Parameters: " + json.dumps(params))
 
     # Optional explicit port via params
-    _configured_port = params.get("serial_port") if "params" in globals() and isinstance(params, dict) else None
-
-    # Try to connect immediately; don't raise if not found (we'll retry in get_output)
-    connected = ensure_serial_open(force=True)
-    if not connected:
-        print("[INFO] No serial port available yet; will keep retrying.")
+    explicit_port = params.get("serial_port") if isinstance(params, dict) else None
+    if explicit_port:
+        print(f"[INFO] Using explicit serial port: {explicit_port}")
+        lock_fh = acquire_file_lock(explicit_port)
+        if HAS_FCNTL and lock_fh is None:
+            raise RuntimeError(f"Serial port {explicit_port} is locked by another process.")
+        try:
+            candidate = open_serial(explicit_port, 115200, timeout=1)
+            if not probe_valid_json(candidate, max_lines=15, settle_seconds=2.0):
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
+                release_file_lock(lock_fh)
+                raise RuntimeError(f"Could not read valid JSON from {explicit_port}.")
+            ser = candidate
+            global _port_lock_fh
+            _port_lock_fh = lock_fh
+        except Exception:
+            release_file_lock(lock_fh)
+            raise
+    else:
+        ser = auto_detect_port()
 
     try:
-        state["n"] = 0
+        ser.reset_input_buffer()
     except Exception:
         pass
+
+    state["n"] = 0
+    print(f"[PYTHON] Serial initialized on {ser.port}")
 
 
 def get_output():
@@ -239,10 +207,6 @@ def get_output():
     Called repeatedly by MADS to retrieve the next JSON message from the device.
     Returns a JSON string.
     """
-    # Ensure we have a connection; if not, retry periodically
-    if not ensure_serial_open():
-        return json.dumps({"processed": False})
-
     try:
         raw_bytes = ser.readline()
         if not raw_bytes:
@@ -253,21 +217,12 @@ def get_output():
             return json.dumps({"processed": False})
 
         data = json.loads(raw)
-        try:
-            state["n"] = state.get("n", 0) + 1
-        except Exception:
-            pass
+        state["n"] += 1
         data["processed"] = False
         return json.dumps(data)
 
     except json.JSONDecodeError as e:
         print(f"[ERROR] JSONDecodeError: {e}")
-        return json.dumps({"processed": False})
-
-    except (serial.SerialException, OSError) as e:
-        print(f"[ERROR] Serial error (will reconnect): {e}")
-        # Device likely disconnected; close and mark for reconnect
-        close_current_serial()
         return json.dumps({"processed": False})
 
     except Exception as e:
