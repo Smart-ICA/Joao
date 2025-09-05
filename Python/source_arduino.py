@@ -3,8 +3,8 @@ Source agent that reads JSON lines from an Arduino over a serial port.
 
 Behavior:
 - Auto-detects an available serial port (/dev/ttyACMx or /dev/ttyUSBx).
-- Uses pySerial exclusive=True (when supported) to avoid multi-process conflicts.
-- Accepts an explicit port via params["serial_port"], validated before use.
+- Ensures per-port exclusivity (pySerial exclusive=True when available, plus a /tmp file lock on POSIX).
+- Accepts an explicit port via params["serial_port"], but will still validate it.
 - Confirms a port only after reading a valid JSON line.
 - Automatically retries connection if no port is available or after a disconnect.
 
@@ -20,9 +20,17 @@ import os
 import serial
 from serial.tools import list_ports
 
+# Optional POSIX file-lock support
+try:
+    import fcntl
+    HAS_FCNTL = True
+except Exception:
+    HAS_FCNTL = False
+
 agent_type = "source"
 
 ser = None
+_port_lock_fh = None
 _configured_port = None
 _last_connect_attempt = 0.0
 _RETRY_INTERVAL_SECONDS = 3.0
@@ -30,12 +38,8 @@ _RETRY_INTERVAL_SECONDS = 3.0
 
 def list_candidate_ports():
     """Return a prioritized list of likely Arduino serial ports."""
-    detected = [
-        p.device for p in list_ports.comports()
-        if p.device and ("/ttyACM" in p.device or "/ttyUSB" in p.device)
-    ]
+    detected = [p.device for p in list_ports.comports() if p.device and ("/ttyACM" in p.device or "/ttyUSB" in p.device)]
     detected = sorted(detected, key=lambda x: ("/ttyACM" not in x, x))  # ACM first, then USB
-
     common = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
     for c in common:
         if c not in detected and os.path.exists(c):
@@ -43,20 +47,48 @@ def list_candidate_ports():
     return detected
 
 
+def acquire_file_lock(port_path):
+    """Acquire a non-blocking file lock for the port. Returns file handle or None."""
+    if not HAS_FCNTL:
+        return None
+    lock_path = f"/tmp/serial-lock-{os.path.basename(port_path)}.lock"
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(str(os.getpid()))
+        fh.flush()
+        return fh
+    except BlockingIOError:
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return None
+
+
+def release_file_lock(fh):
+    if not fh or not HAS_FCNTL:
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        fh.close()
+    except Exception:
+        pass
+
+
 def open_serial(port_path, baudrate=115200, timeout=1):
-    """Open the serial port with exclusivity when supported by pySerial."""
+    """Open the serial port with exclusivity when supported."""
     try:
         return serial.Serial(port_path, baudrate, timeout=timeout, exclusive=True)
     except TypeError:
-        # Older pySerial does not support 'exclusive'
         return serial.Serial(port_path, baudrate, timeout=timeout)
 
 
 def probe_valid_json(connection, max_lines=12, settle_seconds=2.0):
-    """
-    After opening the port, wait briefly and try to read a valid JSON line.
-    Returns True if a JSON object is parsed successfully.
-    """
+    """Wait briefly and try to read a valid JSON line."""
     time.sleep(settle_seconds)  # many Arduinos reset on open
     try:
         connection.reset_input_buffer()
@@ -84,8 +116,8 @@ def probe_valid_json(connection, max_lines=12, settle_seconds=2.0):
 
 
 def close_current_serial():
-    """Close the current serial connection, if any."""
-    global ser
+    """Close current serial and release lock, if any."""
+    global ser, _port_lock_fh
     try:
         if ser:
             try:
@@ -94,6 +126,12 @@ def close_current_serial():
                 pass
     finally:
         ser = None
+        if _port_lock_fh:
+            try:
+                release_file_lock(_port_lock_fh)
+            except Exception:
+                pass
+            _port_lock_fh = None
 
 
 def ensure_serial_open(force=False):
@@ -101,7 +139,7 @@ def ensure_serial_open(force=False):
     Ensure 'ser' is open and ready. If not, try to auto-detect and open.
     Throttles connection attempts unless 'force' is True.
     """
-    global ser, _last_connect_attempt
+    global ser, _port_lock_fh, _last_connect_attempt
 
     if ser and getattr(ser, "is_open", False):
         return True
@@ -111,7 +149,7 @@ def ensure_serial_open(force=False):
         return False
     _last_connect_attempt = now
 
-    # Build candidate list: explicit port first (if any), then detected ports
+    # Try an explicit configured port first, then detected candidates
     candidates = []
     if _configured_port:
         candidates.append(_configured_port)
@@ -120,19 +158,27 @@ def ensure_serial_open(force=False):
             candidates.append(p)
 
     for port in candidates:
+        # Acquire a lock (if supported) to avoid multi-process conflicts
+        lock_fh = acquire_file_lock(port)
+        if HAS_FCNTL and lock_fh is None:
+            # Locked by another process
+            continue
+
         conn = None
         try:
             conn = open_serial(port, 115200, timeout=1)
-        except serial.SerialException as e:
-            print(f"[INFO] {port} unavailable: {e}")
+        except serial.SerialException:
+            release_file_lock(lock_fh)
             continue
-        except Exception as e:
-            print(f"[INFO] {port} open error: {e}")
+        except Exception:
+            release_file_lock(lock_fh)
             continue
 
         ok = probe_valid_json(conn, max_lines=15, settle_seconds=2.0)
         if ok:
             ser = conn
+            # keep the lock while using the port
+            _set_lock(lock_fh)
             try:
                 ser.reset_input_buffer()
             except Exception:
@@ -144,10 +190,22 @@ def ensure_serial_open(force=False):
                 conn.close()
             except Exception:
                 pass
+            release_file_lock(lock_fh)
 
     # No suitable port found
     close_current_serial()
     return False
+
+
+def _set_lock(lock_fh):
+    """Helper to assign the active lock handle, releasing any previous one."""
+    global _port_lock_fh
+    if _port_lock_fh and _port_lock_fh is not lock_fh:
+        try:
+            release_file_lock(_port_lock_fh)
+        except Exception:
+            pass
+    _port_lock_fh = lock_fh
 
 
 def setup():
